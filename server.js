@@ -34,3 +34,11 @@ app.post("/proxy", async (req, res) => {
 // Porta que o Render define via variável PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Proxy ON na porta ${PORT}`));
+
+// página simples só pra concluir a instalação do app
+app.get('/', (req, res) => {
+  res.type('html').send(`
+    <h1>Frete Carrinho Yampi Proxy</h1>
+    <p>App instalado com sucesso.</p>
+  `);
+});
