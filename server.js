@@ -13,11 +13,14 @@ function centsToBRL(cents) {
 
 function yampiHeaders() {
   return {
+    "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "User-Token": process.env.YAMPI_USER_TOKEN,
-    "User-Secret-Key": process.env.YAMPI_SECRET_KEY,
+    "User-Secret-Key": process.env.YAMPI_SECRET_KEY
   };
 }
+
 
 function normZip(zip) {
   return String(zip || "").replace(/\D/g, "");
