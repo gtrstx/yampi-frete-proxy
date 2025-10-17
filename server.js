@@ -33,7 +33,7 @@ async function yampiQuoteV2({ zipcode, skusIds }) {
   const body = {
     zipcode: normZip(zipcode),
     origin: "cart",
-    skus_ids: skusIds, // IMPORTANT: repetir cada ID conforme quantity
+    skus_ids: skusIds, // repetir cada ID conforme quantity
   };
 
   const resp = await fetch(url, {
@@ -44,9 +44,8 @@ async function yampiQuoteV2({ zipcode, skusIds }) {
   if (!resp.ok) throw new Error(`QUOTE_${resp.status}: ${await resp.text()}`);
 
   const data = await resp.json();
-  // Pode vir data:{...} ou data:[...]; normalizamos para array
   const list = Array.isArray(data?.data) ? data.data : data?.data ? [data.data] : [];
-  return list; // cada item = um serviço retornado
+  return list; // array de serviços
 }
 
 // Produtos v2 (por IDs numéricos) — para obter tempo de postagem
@@ -74,11 +73,11 @@ async function yampiProductsBySkusV2(skusIds) {
     );
     if (!Number.isNaN(id)) map[id] = Math.max(0, days);
   }
-  return map; // { 1233: 2, 2123: 0 }
+  return map; // { skuId: postingDays }
 }
 
 // ======================
-// Resolver sku_id a partir de SKU string (opcional)
+// Resolver sku_id a partir de SKU string (com fallback)
 // ======================
 const SKU_CACHE = new Map(); // skuString -> { id, ts }
 const SKU_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
@@ -94,28 +93,47 @@ function cacheSetSkuId(sku, id) {
 }
 
 // Busca produtos por **SKU string** para pegar IDs numéricos (sku_id)
+// Tenta ?skus= e, se falhar, tenta ?sku_codes=
 async function yampiProductsBySkuCodes(skuCodes = []) {
   if (!skuCodes.length) return {};
   const unique = [...new Set(skuCodes)];
+  const base = `${process.env.YAMPI_BASE_URL}/v2/${process.env.YAMPI_ALIAS}/products`;
 
-  // ⚠️ Se a sua doc usar outro nome de parâmetro (ex.: sku_codes), ajuste aqui:
-  const url = `${process.env.YAMPI_BASE_URL}/v2/${process.env.YAMPI_ALIAS}/products?skus=${encodeURIComponent(unique.join(','))}`;
+  const toMap = (json) => {
+    const arr = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : []);
+    const map = {};
+    for (const p of arr) {
+      const skuStr = String(p?.sku || p?.code || "").trim();
+      const idNum  = Number(p?.id ?? p?.sku_id);
+      if (skuStr && Number.isFinite(idNum)) {
+        map[skuStr] = idNum;
+      }
+    }
+    return map;
+  };
 
-  const resp = await fetch(url, { headers: yampiHeaders() });
-  if (!resp.ok) throw new Error(`PROD_SKUS_${resp.status}: ${await resp.text()}`);
+  // 1) tenta ?skus=
+  let url = `${base}?skus=${encodeURIComponent(unique.join(","))}`;
+  let resp = await fetch(url, { headers: yampiHeaders() });
 
-  const data = await resp.json();
-  const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
-  const map = {};
-  for (const p of arr) {
-    const skuStr = String(p?.sku || p?.code || '').trim();
-    const idNum  = Number(p?.id ?? p?.sku_id);
-    if (skuStr && Number.isFinite(idNum)) {
-      map[skuStr] = idNum;
-      cacheSetSkuId(skuStr, idNum);
+  // 2) se não OK, tenta ?sku_codes=
+  if (!resp.ok) {
+    url = `${base}?sku_codes=${encodeURIComponent(unique.join(","))}`;
+    resp = await fetch(url, { headers: yampiHeaders() });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`PROD_SKUS_LOOKUP_${resp.status}: ${body || "Falha ao buscar produtos por SKU"}`);
     }
   }
-  return map; // { "SKU-ABC": 1233, "SKU-DEF": 2123 }
+
+  const data = await resp.json();
+  const map = toMap(data);
+
+  // cache simples
+  for (const [sku, id] of Object.entries(map)) {
+    cacheSetSkuId(sku, id);
+  }
+  return map; // { "SKU-ABC": 1233, ... }
 }
 
 // ======================
@@ -123,7 +141,7 @@ async function yampiProductsBySkuCodes(skuCodes = []) {
 // ======================
 
 // Healthcheck / página de instalação
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.type("html").send(`
     <h1>Frete Carrinho Yampi Proxy</h1>
     <p>App instalado com sucesso.</p>
@@ -148,7 +166,7 @@ app.post("/proxy", async (req, res) => {
     // ======================
     const skusIds = [];
 
-    // Tente primeiro por sku_id_yampi numérico
+    // Primeiro: tenta usar sku_id_yampi numérico (melhor cenário)
     for (const it of items) {
       const id = Number(it.sku_id_yampi ?? it.sku_id);
       const qty = Number(it.quantity || 1);
@@ -157,19 +175,20 @@ app.post("/proxy", async (req, res) => {
       }
     }
 
-    // Se nenhum ID foi encontrado, tente resolver pelos SKUs (string)
+    // Se nenhum ID foi encontrado, tentar resolver por SKU string
     if (!skusIds.length) {
-      // Coletar SKUs string
       const skuCodes = [];
       for (const it of items) {
-        const skuStr = String(it.sku ?? '').trim();
+        const skuStr = String(it.sku ?? "").trim();
         if (skuStr) skuCodes.push(skuStr);
       }
       if (!skuCodes.length) {
-        return res.status(400).json({ error: "nenhum SKU informado; envie 'sku' (string) ou 'sku_id_yampi' numérico" });
+        return res.status(400).json({
+          error: "nenhum SKU informado; envie 'sku' (string) ou 'sku_id_yampi' numérico"
+        });
       }
 
-      // Tenta cache
+      // cache -> API
       const skuIdMap = {};
       const missing = [];
       for (const sku of skuCodes) {
@@ -177,13 +196,11 @@ app.post("/proxy", async (req, res) => {
         if (cached != null) skuIdMap[sku] = cached; else missing.push(sku);
       }
 
-      // Busca na Yampi os que faltam
       if (missing.length) {
         const fetched = await yampiProductsBySkuCodes(missing);
         Object.assign(skuIdMap, fetched);
       }
 
-      // Verifica se todos foram resolvidos
       const notFound = skuCodes.filter(s => skuIdMap[s] == null);
       if (notFound.length) {
         return res.status(422).json({
@@ -192,18 +209,18 @@ app.post("/proxy", async (req, res) => {
         });
       }
 
-      // Monta skus_ids repetindo conforme quantity
       for (const it of items) {
-        const skuStr = String(it.sku ?? '').trim();
+        const skuStr = String(it.sku ?? "").trim();
         const id = skuIdMap[skuStr];
         const qty = Number(it.quantity || 1);
         for (let i = 0; i < qty; i++) skusIds.push(id);
       }
     }
 
-    // Segurança extra
     if (!skusIds.length) {
-      return res.status(400).json({ error: "skus_ids ausentes; envie sku_id_yampi numérico por item ou sku string para resolver" });
+      return res.status(400).json({
+        error: "skus_ids ausentes; envie sku_id_yampi numérico por item ou sku string para resolver"
+      });
     }
 
     // ======================
@@ -212,7 +229,7 @@ app.post("/proxy", async (req, res) => {
     const services = await yampiQuoteV2({ zipcode: postal_code, skusIds });
 
     // ======================
-    // 3) Tempo de postagem (pega MAIOR entre os itens)
+    // 3) Tempo de postagem (MAIOR entre os itens)
     // ======================
     const postingBySkuId = await yampiProductsBySkusV2(skusIds);
     const postingMax = Object.values(postingBySkuId).reduce(
@@ -235,12 +252,11 @@ app.post("/proxy", async (req, res) => {
       const totalDays = baseDays + postingMax;
 
       return {
-        // Preserve os nomes/códigos exibidos no checkout da Yampi
         name: s.service_display_name || s.service_name || s.title,
         code: s.service_id || s.service_code,
         price: priceCents ?? s.price,
         formatted_price:
-          priceCents != null ? centsToBRL(priceCents) : s.formatted_price || s.price,
+          priceCents != null ? centsToBRL(priceCents) : (s.formatted_price || s.price),
         deadline: totalDays ? `até ${totalDays} dia${totalDays > 1 ? "s" : ""}` : "",
       };
     });
@@ -249,7 +265,10 @@ app.post("/proxy", async (req, res) => {
     return res.json({ rates });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: "falha no proxy", detail: String(e?.message || e) });
+    return res.status(500).json({
+      error: "falha no proxy",
+      detail: String(e?.message || e)
+    });
   }
 });
 
