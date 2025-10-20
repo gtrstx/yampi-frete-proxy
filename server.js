@@ -10,6 +10,7 @@ const {
   YAMPI_ALIAS = "sonhosdeninar",
   YAMPI_USER_TOKEN = "IsvW5rTgbJYCsi60MbeOYB5txTomDiRmBqJozw6d",
   YAMPI_SECRET_KEY = "sk_r6WnGTeQYkLwhJuR1rdLmjkbvZB34UjI6xLxV",
+  ALLOWED_ORIGINS = "sonhosdeninar.myshopify.com",
 } = process.env;
 
 // Evita crash se ALLOWED_ORIGINS não existir
