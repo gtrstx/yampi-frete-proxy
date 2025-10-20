@@ -275,6 +275,23 @@ app.post("/proxy", async (req, res) => {
   }
 });
 
-// Porta (Render define PORT)
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy ON na porta ${PORT}`));
+app.get('/healthz', (_,res)=>res.send('ok')); // opcional p/ health check
+app.listen(PORT, '0.0.0.0', () => console.log('listening on', PORT));
+
+
+// no topo, depois de criar o app
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '';
+  const allow = /sonhosdeninar\.com$/.test(origin) || /myshopify\.com$/.test(origin);
+  if (allow) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+['YAMPI_BASE_URL','YAMPI_ALIAS','YAMPI_USER_TOKEN','YAMPI_SECRET_KEY'].forEach(k=>{
+  if(!process.env[k]) console.error(`[ENV] Faltando ${k}`);
+});
